@@ -1,0 +1,12 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+backups/*.dump
+*.tfplan
+terraform-plan.txt
+*.tfvars.local
+.DS_Store
+APPROACH_NOTES.md
+INTERVIEW_QA.md
