@@ -36,9 +36,9 @@ resource "random_password" "master" {
 resource "aws_db_instance" "this" {
   identifier = "${var.name}-postgres"
 
-  engine           = "postgres"
-  engine_version   = "16"
-  instance_class   = var.instance_class
+  engine            = "postgres"
+  engine_version    = "16"
+  instance_class    = var.instance_class
   allocated_storage = var.allocated_storage
   storage_type      = "gp3"
   storage_encrypted = true
@@ -52,14 +52,14 @@ resource "aws_db_instance" "this" {
   vpc_security_group_ids = [aws_security_group.this.id]
   publicly_accessible    = false
 
-  backup_retention_period = var.backup_retention_period
-  backup_window           = "18:00-19:00"
-  maintenance_window      = "sun:19:00-sun:20:00"
-  deletion_protection     = var.deletion_protection
-  multi_az                = var.multi_az
-  skip_final_snapshot     = !var.deletion_protection
+  backup_retention_period   = var.backup_retention_period
+  backup_window             = "18:00-19:00"
+  maintenance_window        = "sun:19:00-sun:20:00"
+  deletion_protection       = var.deletion_protection
+  multi_az                  = var.multi_az
+  skip_final_snapshot       = !var.deletion_protection
   final_snapshot_identifier = var.deletion_protection ? "${var.name}-final" : null
-  copy_tags_to_snapshot   = true
+  copy_tags_to_snapshot     = true
 
   tags = merge(var.tags, { Name = "${var.name}-postgres" })
 }
