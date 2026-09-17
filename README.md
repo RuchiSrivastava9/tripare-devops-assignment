@@ -29,17 +29,19 @@ The ALB is the only public entry point. ECS accepts application traffic only fro
 ├── scripts/
 │   ├── backup.sh
 │   └── restore.sh
-└── .github/workflows/terraform.yml
+└── .github/
+    └── workflows/
+        └── terraform.yml
 ```
 
 ## Part 1/2 - Terraform
 
-The two environments share the same modules but have different sizing and operational settings.
+The two environments share the same Terraform modules but use different resource sizing and operational settings.
 
 ### Dev
 
 - smaller ECS service and RDS instance
-- one NAT gateway to keep the example cheaper
+- one NAT gateway to keep the environment simpler and lower cost
 - shorter backup retention
 - deletion protection disabled
 - single-AZ RDS
@@ -54,31 +56,69 @@ The two environments share the same modules but have different sizing and operat
 
 ### State
 
-Each environment has its own S3 backend configuration and state key. The backend configuration is intentionally separate from the application variables. Create the S3 state bucket before using the real backend. For review without AWS state, use `terraform init -backend=false`.
+Each environment has its own Terraform state configuration.
 
-The S3 backend uses native S3 state locking with `use_lockfile = true`. Bucket versioning should also be enabled on the state bucket.
+For this assessment, the active `backend.tf` uses a local backend so the Terraform configuration can be initialized and reviewed without requiring an AWS account or remote state bucket.
+
+Example S3 backend configurations are provided as:
+
+- `infra/envs/dev/backend.s3.tf.example`
+- `infra/envs/prod/backend.s3.tf.example`
+
+The S3 examples use separate state keys for dev and prod and enable native S3 state locking with `use_lockfile = true`. For a real deployment, the S3 state bucket should have versioning enabled and appropriate access controls.
+
+For the local assessment setup:
+
+```bash
+terraform init -reconfigure
+terraform validate
+terraform plan -refresh=false -var-file=terraform.tfvars
+```
 
 ### Local Terraform review
 
-From `infra/envs/dev`:
+Run the following commands from `infra/envs/dev`:
 
 ```bash
-terraform init -backend=false
+cd infra/envs/dev
+terraform init -reconfigure
 terraform fmt -check -recursive ../../modules
 terraform fmt -check
 terraform validate
 terraform plan -refresh=false -var-file=terraform.tfvars
 ```
 
-Repeat from `infra/envs/prod`. After the first `terraform init`, commit the generated `.terraform.lock.hcl` file so provider selections are reproducible.
+Then repeat from `infra/envs/prod`:
 
-For a real AWS run, configure credentials through the AWS CLI/environment and use the backend configuration after the state bucket exists.
+```bash
+cd ../prod
+terraform init -reconfigure
+terraform fmt -check -recursive ../../modules
+terraform fmt -check
+terraform validate
+terraform plan -refresh=false -var-file=terraform.tfvars
+```
+
+The generated `.terraform.lock.hcl` files are committed so provider selections are reproducible.
+
+For a real AWS deployment, configure AWS credentials and use the S3 backend configuration after the state bucket exists.
 
 ## Part 3 - GitHub Actions
 
-The workflow runs on pull requests and validates both environments. It uses the HashiCorp `setup-terraform` action and uploads a human-readable plan as an artifact. It initializes with `-backend=false` so the assignment can be reviewed without creating a remote state bucket. The environment `terraform.tfvars` files set `plan_only = true`; this supplies mock provider credentials and skips credential/account metadata checks for the assignment plan. A real deployment should set `plan_only = false` and authenticate to AWS.
+The workflow validates both the `dev` and `prod` Terraform environments.
 
-A real deployment pipeline should use GitHub OIDC to assume an AWS IAM role rather than long-lived AWS access keys.
+It performs:
+
+- `terraform fmt -check`
+- `terraform init`
+- `terraform validate`
+- `terraform plan`
+
+The workflow uses the local Terraform backend for the assessment environment and initializes it with `terraform init -reconfigure -input=false`, so it can run without requiring a remote S3 state bucket.
+
+The Terraform plan is uploaded as a workflow artifact for review.
+
+For a real AWS deployment, I would use a remote S3 backend and GitHub OIDC to assume an AWS IAM role instead of storing long-lived AWS access keys.
 
 ## Part 4 - Local PostgreSQL
 
@@ -88,22 +128,34 @@ Start the database:
 docker compose up -d db
 ```
 
-The SQL files are executed only when the PostgreSQL volume is initialized for the first time. To rebuild the sample database from scratch, use `docker compose down -v` and start it again.
+The PostgreSQL image initializes the database using the SQL files under `db/migrations` and `db/seed` when the database volume is created for the first time.
 
-The PostgreSQL image automatically runs the files in `db/migrations` and `db/seed` on the first initialization of the database volume.
+To rebuild the sample database from scratch:
 
-Verify:
+```bash
+docker compose down -v
+docker compose up -d db
+```
+
+Verify the booking data:
 
 ```bash
 docker compose exec db psql -U postgres -d hotel_db -c "SELECT COUNT(*) AS booking_count FROM hotel_bookings;"
+```
+
+Check cities and statuses:
+
+```bash
 docker compose exec db psql -U postgres -d hotel_db -c "SELECT city, status, COUNT(*) FROM hotel_bookings GROUP BY city, status ORDER BY city, status;"
 ```
 
-Expected booking count: at least 100 (this example creates 120).
+Expected booking count: 120.
 
-## Query optimization
+The seed data includes multiple cities, organizations, statuses, and booking events.
 
-The assessment query filters by an exact `city` and a range on `created_at`:
+## Part 5 - Query Optimization
+
+The assessment query is:
 
 ```sql
 SELECT org_id, status, COUNT(*), SUM(amount)
@@ -117,14 +169,16 @@ The main index is:
 
 ```sql
 CREATE INDEX idx_hotel_bookings_city_created_at
-    ON hotel_bookings (city, created_at);
+ON hotel_bookings (city, created_at);
 ```
 
-`city` is first because it is an equality predicate, followed by `created_at` because it is a range predicate. This lets PostgreSQL narrow the candidate rows before the grouping step. I intentionally did not add `status` to the filtering portion of the index because the query does not filter on `status`.
+`city` is first because it is an equality predicate, followed by `created_at` because it is a range predicate. This allows PostgreSQL to narrow the candidate rows before the grouping step.
 
-For the booking event table, `booking_id` is indexed because it is the natural lookup/join key.
+I did not add `status` to this index because the query does not filter on `status`.
 
-To compare the plan before/after indexing in a real database, use:
+For the booking event table, `booking_id` is indexed because it is the natural lookup and join key.
+
+To inspect the execution plan, use:
 
 ```sql
 EXPLAIN (ANALYZE, BUFFERS)
@@ -135,9 +189,9 @@ WHERE city = 'delhi'
 GROUP BY org_id, status;
 ```
 
-The important thing to look for is whether the index is used and how many rows/heap blocks are touched. Exact plan output depends on data distribution and PostgreSQL statistics.
+The important things to review are whether PostgreSQL uses the index and how many rows and buffers are accessed. The exact execution plan depends on data distribution and PostgreSQL statistics.
 
-## Part 6 - Backup and restore
+## Part 6 - Backup and Restore
 
 ### Backup
 
@@ -153,18 +207,26 @@ This creates a timestamped PostgreSQL custom-format dump under `backups/`.
 ./scripts/restore.sh backups/hotel_db_YYYYMMDD_HHMMSS.dump
 ```
 
-The restore script creates a fresh database named `hotel_db_restore`, restores the dump into it, and then verifies the booking count.
+The restore script creates a fresh database named `hotel_db_restore`, restores the dump into it, and verifies the restored data.
 
-You can also verify manually:
+Manual verification:
 
 ```bash
 docker compose exec db psql -U postgres -d hotel_db_restore -c "SELECT COUNT(*) FROM hotel_bookings;"
+```
+
+```bash
 docker compose exec db psql -U postgres -d hotel_db_restore -c "SELECT COUNT(*) FROM booking_events;"
 ```
+
+The tested restore contained:
+
+- 120 hotel bookings
+- 60 booking events
 
 ## Notes
 
 - No AWS deployment is required for this assessment.
 - No AWS credentials or database secrets are committed to the repository.
-- The RDS module uses a Terraform-generated password only for this assessment example. For a real production implementation, I would use RDS-managed credentials/Secrets Manager instead of storing a database password in Terraform state.
+- The RDS module generates a random password for this assessment example. For a real production implementation, I would use AWS Secrets Manager or RDS-managed master credentials and avoid managing database passwords directly in Terraform configuration.
 - The ECS container uses Nginx as a simple placeholder application because the assessment is evaluating infrastructure rather than application code.
